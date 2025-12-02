@@ -12,21 +12,27 @@ import numpy as np
 import itertools
 from collections import Counter
 import matplotlib.pyplot as plt
+import pickle
 
 # --- CẤU HÌNH TRANG ---
-st.set_page_config(page_title="Lottery AI V9.2 Mobile", layout="wide", page_icon="🎲")
+st.set_page_config(page_title="Lottery AI V10.0 - Ensemble Models", layout="wide", page_icon="🧠")
 
-# --- THƯ VIỆN AI ---
+# --- THƯ VIỆN AI NÂNG CAO ---
 try:
     from sklearn.cluster import KMeans
-    from sklearn.linear_model import LinearRegression
+    from sklearn.linear_model import LinearRegression, LogisticRegression
+    from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+    from sklearn.neural_network import MLPRegressor
+    from sklearn.preprocessing import MinMaxScaler
+    from sklearn.model_selection import train_test_split
+    import xgboost as xgb
     SKLEARN_AVAILABLE = True
-except ImportError:
+except ImportError as e:
     SKLEARN_AVAILABLE = False
-    st.warning("⚠️ Chưa cài scikit-learn. Một số tính năng AI sẽ bị hạn chế.")
+    st.error(f"⚠️ Thiếu thư viện AI: {e}")
 
 # ==================================================================================
-# CLASS: DATABASE & ANALYZER (LOGIC GIỮ NGUYÊN TỪ V9.2)
+# CLASS: DATABASE
 # ==================================================================================
 class DBManager:
     def __init__(self, db_file="lottery.db"):
@@ -57,155 +63,162 @@ class DBManager:
             data.append(row)
         return pd.DataFrame(data)
 
-class AdvancedAnalyzer:
+# ==================================================================================
+# CLASS: FEATURE ENGINEERING (TẠO ĐẶC TRƯNG CHO AI)
+# ==================================================================================
+class FeatureEngine:
     def __init__(self, df):
         self.df = df.copy()
-        self.history = []
-        self.full_history = []
         if not self.df.empty:
-            data_cols = [c for c in self.df.columns if c != 'Ngay']
             try:
                 self.df['DateObj'] = pd.to_datetime(self.df['Ngay'], dayfirst=True)
                 self.df = self.df.sort_values(by='DateObj', ascending=True)
             except: pass
-            for _, row in self.df.iterrows():
-                day_nums = []
-                full_day_nums = []
-                for col in data_cols:
-                    val = str(row[col])
-                    if val and val != 'nan':
-                        clean = ''.join(filter(str.isdigit, val))
-                        if len(clean) >= 2: day_nums.append(clean[-2:])
-                        if len(clean) >= 3: full_day_nums.append(clean)
-                self.history.append({'date': row['Ngay'], 'nums': day_nums})
-                self.full_history.append({'date': row['Ngay'], 'nums': full_day_nums})
+        
+        self.history = []
+        data_cols = [c for c in self.df.columns if c != 'Ngay']
+        for _, row in self.df.iterrows():
+            day_nums = []
+            for col in data_cols:
+                val = str(row[col])
+                clean = ''.join(filter(str.isdigit, val))
+                if len(clean) >= 2: day_nums.append(clean[-2:])
+            self.history.append(day_nums)
 
-    def autocorr_strength(self, number, max_lag=30):
-        series = [1 if number in h['nums'] else 0 for h in self.history]
-        x = np.array(series, dtype=float)
-        n = len(x)
-        if n < 10: return 0.0
-        x = x - x.mean()
-        if x.var() == 0: return 0.0
-        full_corr = np.correlate(x, x, mode='full')
-        corr = full_corr[full_corr.size//2:] / (np.arange(n, 0, -1) * x.var())
-        ac = corr[1:max_lag]
-        return float(np.max(ac)) if len(ac) > 0 else 0.0
+    def extract_features(self, target_num, history_slice):
+        """
+        Trích xuất đặc trưng của 1 con số tại thời điểm cụ thể dựa trên lịch sử trước đó.
+        Features: Freq, Gan, AutoCorr, Last_Appear_Distance, v.v.
+        """
+        # 1. Frequency (trong 30 kỳ gần nhất của slice)
+        recent_30 = history_slice[-30:]
+        flat_30 = [n for sub in recent_30 for n in sub]
+        freq = flat_30.count(target_num)
+        
+        # 2. Gan (Khoảng cách chưa về)
+        gan = 0
+        for sub in reversed(history_slice):
+            if target_num in sub: break
+            gan += 1
+            
+        # 3. AutoCorrelation (Đơn giản hóa)
+        series = [1 if target_num in sub else 0 for sub in history_slice[-50:]]
+        if len(series) > 10 and np.var(series) > 0:
+            # Lag 1 autocorrelation
+            ac = pd.Series(series).autocorr(lag=1)
+            ac = 0 if np.isnan(ac) else ac
+        else:
+            ac = 0
+            
+        return [freq, gan, ac]
 
-    def fft_cycle_strength(self, number):
-        series = [1 if number in h['nums'] else 0 for h in self.history]
-        x = np.array(series, dtype=float)
-        n = len(x)
-        if n < 10: return 0.0
-        fft = np.fft.rfft(x - x.mean())
-        ps = np.abs(fft)**2
-        ps[0] = 0
-        idx = np.argmax(ps)
-        return float(ps[idx]) / (n/2) if n > 0 else 0
+    def create_training_dataset(self, lookback_days=100):
+        """
+        Tạo dữ liệu huấn luyện: 
+        X = Các đặc trưng ngày hôm qua
+        y = Kết quả ngày hôm nay (1: về, 0: không về)
+        """
+        X = []
+        y = []
+        
+        # Chỉ lấy 100 kỳ gần nhất để train cho nhanh
+        available_hist = self.history
+        if len(available_hist) < 50: return None, None
+        
+        start_idx = len(available_hist) - lookback_days if len(available_hist) > lookback_days else 50
+        
+        for i in range(start_idx, len(available_hist)):
+            past_data = available_hist[:i] # Dữ liệu quá khứ tính đến ngày i-1
+            current_result = available_hist[i] # Kết quả thực tế ngày i
+            
+            # Lấy mẫu ngẫu nhiên 10 số để tạo data train (tránh quá tải)
+            # Bao gồm cả số về và số không về
+            sample_nums = set(current_result) # Positive samples
+            while len(sample_nums) < 20: # Thêm Negative samples
+                sample_nums.add(str(random.randint(0,99)).zfill(2))
+            
+            for num in sample_nums:
+                features = self.extract_features(num, past_data)
+                label = 1 if num in current_result else 0
+                X.append(features)
+                y.append(label)
+                
+        return np.array(X), np.array(y)
 
-    def markov_chain_next(self, last_draw_nums):
-        next_counts = {str(i).zfill(2): 0 for i in range(100)}
-        if not last_draw_nums or len(self.history) < 2: return next_counts
-        recent_hist = self.history[-200:]
-        for i in range(len(recent_hist) - 1):
-            matches = set(recent_hist[i]['nums']).intersection(set(last_draw_nums))
-            if len(matches) > 0:
-                weight = len(matches) 
-                for num in recent_hist[i+1]['nums']:
-                    if num in next_counts: next_counts[num] += weight
-        return next_counts
-
-    def kmeans_clustering(self, stats_df):
-        if not SKLEARN_AVAILABLE: return stats_df
-        X = stats_df[['freq', 'gan']].values
-        n_clusters = 3 if len(X) >= 3 else 1
-        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-        stats_df['cluster'] = kmeans.fit_predict(X)
-        cluster_scores = {}
-        for c in range(n_clusters):
-            sub = stats_df[stats_df['cluster'] == c]
-            if sub.empty: continue
-            cluster_scores[c] = sub['freq'].mean()
-        max_score = max(cluster_scores.values()) if cluster_scores else 1
-        stats_df['kmeans_score'] = stats_df['cluster'].map(lambda x: cluster_scores.get(x, 0) / max_score)
-        return stats_df
-
-    def linear_trend(self):
-        trends = {}
-        if len(self.history) < 30: return {str(i).zfill(2): 0 for i in range(100)}
-        recent_30 = self.history[-30:]
-        for num in [str(i).zfill(2) for i in range(100)]:
-            y = [1 if num in h['nums'] else 0 for h in recent_30]
-            X = np.array(range(len(y))).reshape(-1, 1)
-            if SKLEARN_AVAILABLE:
-                reg = LinearRegression().fit(X, y)
-                trends[num] = reg.coef_[0]
-            else: trends[num] = 0
-        min_v, max_v = min(trends.values()), max(trends.values())
-        norm_trends = {}
-        for k, v in trends.items():
-            if max_v - min_v == 0: norm_trends[k] = 0
-            else: norm_trends[k] = (v - min_v) / (max_v - min_v)
-        return norm_trends
-
-    def pair_influence_score(self, last_draw_nums):
-        pair_counts = {}
-        recent_history = self.history[-100:] 
-        for h in recent_history:
-            nums = sorted(list(set(h['nums'])))
-            for a, b in itertools.combinations(nums, 2):
-                pair = f"{a}-{b}"
-                pair_counts[pair] = pair_counts.get(pair, 0) + 1
-        scores = {str(i).zfill(2): 0 for i in range(100)}
-        if not last_draw_nums: return scores
-        for pair, cnt in pair_counts.items():
-            a, b = pair.split('-')
-            if a in last_draw_nums: scores[b] += cnt
-            if b in last_draw_nums: scores[a] += cnt
-        return scores
-
-    def analyze_pairs_list(self, limit_days=100):
-        pair_counter = Counter()
-        recent = self.history[-limit_days:]
-        for h in recent:
-            unique_nums = sorted(list(set(h['nums'])))
-            for pair in itertools.combinations(unique_nums, 2):
-                pair_counter[f"{pair[0]}-{pair[1]}"] += 1
-        return pair_counter.most_common(50)
-
-    def predict_position_digit(self, position_from_end, top_k=3):
-        counts = {str(i): 0 for i in range(10)}
-        recent_history = self.full_history[-200:] 
-        for h in recent_history:
-            for num_str in h['nums']:
-                if len(num_str) >= position_from_end:
-                    digit = num_str[-position_from_end]
-                    counts[digit] += 1
-        sorted_digits = sorted(counts.items(), key=lambda x: x[1], reverse=True)
-        return [d[0] for d in sorted_digits[:top_k]]
-
-    def generate_3d_4d_smart(self, top_2d_list):
-        top_tram = self.predict_position_digit(3, top_k=3)
-        top_nghin = self.predict_position_digit(4, top_k=2)
-        res_3d = []
-        res_4d = []
-        for num_2d in top_2d_list:
-            for cang in top_tram: res_3d.append(f"{cang}{num_2d}")
-        for num_3d in res_3d:
-            for cang_4 in top_nghin: res_4d.append(f"{cang_4}{num_3d}")
-        return res_3d, res_4d
+    def get_current_features(self):
+        """Lấy đặc trưng ngày mới nhất để dự đoán"""
+        X_pred = []
+        nums_map = []
+        for i in range(100):
+            num = str(i).zfill(2)
+            feat = self.extract_features(num, self.history)
+            X_pred.append(feat)
+            nums_map.append(num)
+        return np.array(X_pred), nums_map
 
 # ==================================================================================
-# UI CHÍNH (STREAMLIT)
+# CLASS: MODEL MANAGER (QUẢN LÝ MÔ HÌNH)
 # ==================================================================================
-PROVINCES = {
-    "--- MIỀN BẮC ---": "xsmb", "Miền Bắc": "xsmb",
-    "--- MIỀN NAM ---": "xshcm", "TP. HCM": "xshcm", "Đồng Tháp": "xsdt", "Cà Mau": "xscm", 
-    "Bến Tre": "xsbt", "Vũng Tàu": "xsvt", "Bạc Liêu": "xsbl", "Đồng Nai": "xsdn", 
-    "Cần Thơ": "xsct", "Sóc Trăng": "xsst", "Tây Ninh": "xstn", "An Giang": "xsag",
-    "--- MIỀN TRUNG ---": "xsdng", "Đà Nẵng": "xsdng", "Khánh Hòa": "xskh"
-}
+class ModelManager:
+    def __init__(self):
+        self.models = {}
+        self.scalers = {}
 
+    def train_models(self, X, y, selected_models):
+        if len(X) == 0: return
+        
+        # Scale dữ liệu
+        scaler = MinMaxScaler()
+        X_scaled = scaler.fit_transform(X)
+        self.scalers['main'] = scaler
+        
+        # 1. Random Forest
+        if 'Random Forest' in selected_models:
+            rf = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
+            rf.fit(X_scaled, y)
+            self.models['RF'] = rf
+            
+        # 2. Gradient Boosting (XGBoost)
+        if 'XGBoost' in selected_models:
+            xgb_model = xgb.XGBRegressor(n_estimators=100, learning_rate=0.05, max_depth=5, random_state=42)
+            xgb_model.fit(X_scaled, y)
+            self.models['XGB'] = xgb_model
+            
+        # 3. Neural Network (MLP)
+        if 'Neural Network (MLP)' in selected_models:
+            mlp = MLPRegressor(hidden_layer_sizes=(64, 32), activation='relu', solver='adam', max_iter=500, random_state=42)
+            mlp.fit(X_scaled, y)
+            self.models['MLP'] = mlp
+            
+        # 4. Linear Regression (Base)
+        if 'Linear Regression' in selected_models:
+            lr = LinearRegression()
+            lr.fit(X_scaled, y)
+            self.models['LR'] = lr
+
+    def predict_ensemble(self, X_pred):
+        if not self.models: return np.zeros(len(X_pred))
+        
+        scaler = self.scalers.get('main')
+        if scaler:
+            X_scaled = scaler.transform(X_pred)
+        else:
+            X_scaled = X_pred
+            
+        final_pred = np.zeros(len(X_pred))
+        count = 0
+        
+        for name, model in self.models.items():
+            pred = model.predict(X_scaled)
+            final_pred += pred
+            count += 1
+            
+        return final_pred / count if count > 0 else final_pred
+
+# ==================================================================================
+# UI & LOGIC CHÍNH
+# ==================================================================================
+# ... (Giữ nguyên các hàm scrape, parse HTML cũ) ...
 def get_nums_from_html(html, is_mb):
     soup = BeautifulSoup(html, 'html.parser')
     containers = soup.find_all('table', class_=re.compile(r'result|table|kqxs'))
@@ -225,149 +238,122 @@ def scrape_data(code, days):
     db = DBManager()
     count = 0
     now = datetime.now()
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
+    progress = st.progress(0)
     for i in range(days):
         d = now - timedelta(days=i)
-        ds = d.strftime("%d-%m-%Y")
-        ds_display = d.strftime("%d/%m/%Y")
-        
-        # Thử nhiều nguồn
-        urls = [
-            f"https://xoso.com.vn/{code}-{ds}.html",
-            f"https://xskt.com.vn/{code}/ngay-{ds}"
-        ]
-        
-        found = False
-        for url in urls:
-            try:
-                res = requests.get(url, timeout=3)
-                if res.status_code == 200:
-                    nums = get_nums_from_html(res.text, code=='xsmb')
-                    if nums:
-                        # Lọc rác
-                        check_n = [n for n in nums if n not in [d.strftime("%d"), d.strftime("%m"), d.strftime("%Y")]]
-                        expected = 27 if code=='xsmb' else 18
-                        if len(check_n) >= expected:
-                            db.upsert(ds_display, code, check_n[:expected])
-                            count += 1
-                            found = True
-                            break
-            except: pass
-        
-        progress_bar.progress((i + 1) / days)
-        status_text.text(f"Đang quét ngày {ds_display}...")
+        ds = d.strftime("%d-%m-%Y"); ds_disp = d.strftime("%d/%m/%Y")
+        url = f"https://xoso.com.vn/{code}-{ds}.html"
+        try:
+            res = requests.get(url, timeout=3)
+            if res.status_code == 200:
+                nums = get_nums_from_html(res.text, code=='xsmb')
+                if nums:
+                    check = [n for n in nums if n not in [d.strftime("%d"), d.strftime("%m")]]
+                    expected = 27 if code=='xsmb' else 18
+                    if len(check) >= expected:
+                        db.upsert(ds_disp, code, check[:expected])
+                        count += 1
+        except: pass
+        progress.progress((i+1)/days)
+    st.success(f"Đã cập nhật {count} kỳ.")
+
+# --- CACHING MODEL TRAINING ---
+@st.cache_resource
+def train_ai_manager(df_json, selected_models):
+    # df_json là trick để cache dataframe (hashable)
+    df = pd.read_json(df_json)
+    fe = FeatureEngine(df)
+    X, y = fe.create_training_dataset(lookback_days=200)
     
-    status_text.text(f"Hoàn tất! Đã cập nhật {count} kỳ.")
-    time.sleep(1)
-    status_text.empty()
-    progress_bar.empty()
+    manager = ModelManager()
+    if X is not None:
+        manager.train_models(X, y, selected_models)
+    
+    return manager, fe
 
 # --- GIAO DIỆN ---
-st.title("🎲 Lottery AI Ultimate V9.2 (Mobile)")
-st.markdown("Hệ thống phân tích xổ số chuyên sâu sử dụng AI, chạy trực tiếp trên nền tảng Cloud.")
+st.title("🧠 Lottery AI V10.0 - Neural & Ensemble")
 
-# Sidebar
 with st.sidebar:
-    st.header("1. Cấu hình Dữ liệu")
+    st.header("1. Dữ liệu")
+    PROVINCES = {"Miền Bắc": "xsmb", "TP.HCM": "xshcm", "Đồng Nai": "xsdn", "Đà Nẵng": "xsdng"}
     prov_name = st.selectbox("Chọn Đài", list(PROVINCES.keys()))
     prov_code = PROVINCES[prov_name]
+    if st.button("Cập nhật Data"): scrape_data(prov_code, 30)
     
-    days_scan = st.slider("Số ngày quét dữ liệu", 10, 100, 30)
-    
-    if st.button("♻️ Cập nhật Dữ liệu Mới", use_container_width=True):
-        with st.spinner("Đang kết nối Server để tải dữ liệu..."):
-            scrape_data(prov_code, days_scan)
-        st.success("Cập nhật thành công!")
-
     st.divider()
-    st.header("2. Trọng số AI")
-    w_freq = st.slider("Tần suất", 0.0, 1.0, 0.2)
-    w_gan = st.slider("Lô Gan", 0.0, 1.0, 0.1)
-    w_markov = st.slider("Markov (Bạc nhớ)", 0.0, 1.0, 0.25)
+    st.header("2. Mô hình AI")
+    models_opt = st.multiselect(
+        "Chọn thuật toán tham gia dự đoán:",
+        ["Random Forest", "XGBoost", "Neural Network (MLP)", "Linear Regression"],
+        default=["Random Forest", "XGBoost"]
+    )
     
-    btn_run = st.button("🚀 CHẠY PHÂN TÍCH NGAY", type="primary", use_container_width=True)
+    st.info("💡 Mẹo: Random Forest & XGBoost thường cho kết quả tốt nhất với dữ liệu dạng bảng.")
+    
+    btn_run = st.button("🚀 KÍCH HOẠT AI", type="primary")
 
-# Main Content
 if btn_run:
     db = DBManager()
     df = db.get_df(prov_code)
     
-    if df is None or df.empty:
-        st.error("Chưa có dữ liệu! Vui lòng bấm 'Cập nhật Dữ liệu Mới' ở menu bên trái trước.")
-    else:
-        st.info(f"Đang phân tích {len(df)} kỳ quay của {prov_name}...")
-        analyzer = AdvancedAnalyzer(df)
+    if df is not None:
+        st.write(f"Đang huấn luyện mô hình trên {len(df)} kỳ quay... (Tiến trình này được Cache)")
         
-        # --- LOGIC PHÂN TÍCH (V9.2) ---
-        full_range = [str(i).zfill(2) for i in range(100)]
-        stats_df = pd.DataFrame({'so': full_range})
+        # Train & Cache Models
+        manager, fe = train_ai_manager(df.to_json(), models_opt)
         
-        # 1. Cơ bản
-        all_nums = [n for h in analyzer.history for n in h['nums']]
+        # Predict Today
+        X_pred, nums_map = fe.get_current_features()
+        scores = manager.predict_ensemble(X_pred)
+        
+        # Create Result DataFrame
+        res_df = pd.DataFrame({'so': nums_map, 'ai_score': scores})
+        
+        # Combine with basic stats
+        all_nums = [n for day in fe.history for n in day]
         freq = pd.Series(all_nums).value_counts().reset_index()
         freq.columns = ['so', 'freq']
-        stats_df = stats_df.merge(freq, on='so', how='left').fillna(0)
+        res_df = res_df.merge(freq, on='so', how='left').fillna(0)
         
-        # 2. Gan
-        draws = [set(h['nums']) for h in analyzer.history]
-        gap_dict = {}
-        for n in full_range:
-            g = 0
-            for d_set in draws[::-1]: # Duyệt ngược từ mới nhất
-                if n in d_set: break
-                g += 1
-            gap_dict[n] = g
-        stats_df['gan'] = stats_df['so'].map(gap_dict)
+        # Calculate Final Score (Hybrid: AI + Traditional Stats)
+        # AI score thường từ 0-1 (hoặc thấp hơn), cần scale lên
+        res_df['final_score'] = (res_df['ai_score'] * 70) + (res_df['freq']/res_df['freq'].max() * 30)
+        res_df = res_df.sort_values(by='final_score', ascending=False)
         
-        # 3. AI
-        last_draw_nums = list(draws[-1]) if draws else []
-        stats_df['autocorr'] = stats_df['so'].apply(lambda x: analyzer.autocorr_strength(x))
-        stats_df['fft'] = stats_df['so'].apply(lambda x: analyzer.fft_cycle_strength(x))
-        stats_df['pair_score'] = stats_df['so'].map(analyzer.pair_influence_score(last_draw_nums))
-        stats_df['markov_score'] = stats_df['so'].map(analyzer.markov_chain_next(last_draw_nums))
-        stats_df = analyzer.kmeans_clustering(stats_df)
-        stats_df['trend_score'] = stats_df['so'].map(analyzer.linear_trend())
-
-        # 4. Score
-        def norm(col): return col / (col.max() or 1)
-        stats_df['score'] = (
-            norm(stats_df['freq'])*w_freq + 
-            (stats_df['gan']/(stats_df['gan'].max() or 1))*w_gan + 
-            norm(stats_df['autocorr'])*0.15 + 
-            norm(stats_df['fft'])*0.15 + 
-            norm(stats_df['pair_score'])*0.1 + 
-            norm(stats_df['markov_score'])*w_markov +
-            norm(stats_df.get('kmeans_score', 0))*0.15
-        )
-        stats_df['final_score'] = (stats_df['score'] * 100).round(2)
-        stats_df = stats_df.sort_values(by='final_score', ascending=False)
+        # --- DISPLAY ---
+        col1, col2 = st.columns([2, 1])
         
-        # --- HIỂN THỊ KẾT QUẢ ---
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔥 Top 2D", "🔗 Xiên 2", "🔮 3 Càng", "💎 4 Càng", "📊 Biểu đồ"])
-        
-        with tab1:
-            st.dataframe(stats_df[['so', 'final_score', 'freq', 'gan', 'markov_score', 'pair_score']].head(20), use_container_width=True)
+        with col1:
+            st.subheader("🏆 Dự đoán của AI Ensemble")
+            st.dataframe(res_df.head(20).style.background_gradient(subset=['final_score'], cmap='Greens'), use_container_width=True)
             
-        with tab2:
-            top_pairs = analyzer.analyze_pairs_list(100)
-            pair_df = pd.DataFrame(top_pairs, columns=['Cặp Số', 'Số lần về cùng'])
-            st.dataframe(pair_df, use_container_width=True)
+        with col2:
+            st.subheader("📊 Độ tin cậy mô hình")
+            st.write("Các mô hình đang chạy:")
+            for m in manager.models:
+                st.write(f"- ✅ {m}")
             
-        top_10_2d = stats_df['so'].head(10).tolist()
-        smart_3d, smart_4d = analyzer.generate_3d_4d_smart(top_10_2d)
-        
-        with tab3:
-            st.write("Dự đoán 3 càng dựa trên ghép Càng (Hàng trăm) + Top 10 Lô:")
-            st.table(pd.DataFrame(smart_3d, columns=["Bộ số 3D"]))
-            
-        with tab4:
-            st.write("Dự đoán 4 càng siêu phẩm:")
-            st.table(pd.DataFrame(smart_4d, columns=["Bộ số 4D"]))
-            
-        with tab5:
-            top_20 = stats_df.head(20)
-            fig, ax = plt.subplots(figsize=(10, 4))
-            ax.bar(top_20['so'], top_20['final_score'], color='teal')
+            # Simple Chart
+            fig, ax = plt.subplots()
+            top_10 = res_df.head(10)
+            ax.bar(top_10['so'], top_10['final_score'], color='purple')
             st.pyplot(fig)
+            
+        # --- APRIORI (CẶP SỐ) ---
+        st.divider()
+        st.subheader("🔗 Phân tích Cặp Số (Association Rules)")
+        # Logic đơn giản hóa cho Streamlit
+        pair_counts = Counter()
+        for day in fe.history[-100:]:
+            u = sorted(list(set(day)))
+            for p in itertools.combinations(u, 2):
+                pair_counts[f"{p[0]}-{p[1]}"] += 1
+        
+        top_pairs = pair_counts.most_common(10)
+        cols = st.columns(5)
+        for i, (p, c) in enumerate(top_pairs):
+            cols[i%5].metric(label=f"Cặp {p}", value=f"{c} lần")
+
+    else:
+        st.error("Chưa có dữ liệu.")
