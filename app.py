@@ -308,4 +308,5 @@ def fetch_single_day(target_date, province_code):
                 if clean_nums and len(clean_nums) >= expected:
                     row = {'Ngay': date_display}
                     for idx, n in enumerate(clean_nums[:expected]): row[f'Giai_{idx}'] = n
-                        finally:
+        finally:
+
