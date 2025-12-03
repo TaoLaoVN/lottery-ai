@@ -311,8 +311,8 @@ def fetch_single_day(target_date, province_code):
 # ==================================================================================
 
 def main():
-    st.set_page_config(page_title="Lottery AI V9.2", layout="wide")
-    st.title("🎲 Lottery AI V9.2 - Streamlit Edition")
+    st.set_page_config(page_title="Phân tích số liệu AI", layout="wide")
+    st.title("Phân tích số liệu AI - MaTools")
 
     # --- KHỞI TẠO ---
     if 'db' not in st.session_state:
@@ -334,7 +334,7 @@ def main():
 
         # Cập nhật Data (Scraping)
         with st.expander("♻️ Cập nhật Data Online"):
-            days_to_scrape = st.number_input("Số ngày quét", min_value=1, max_value=5000, value=30)
+            days_to_scrape = st.number_input("Số ngày quét", min_value=1, max_value=5000, value=1)
             if st.button("Bắt đầu quét"):
                 with st.spinner(f"Đang quét {selected_province_name}..."):
                     valid_days = SCHEDULE.get(selected_province_code, [0,1,2,3,4,5,6])
@@ -367,7 +367,7 @@ def main():
         # Load Data Buttons
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("📂 Load DB", use_container_width=True):
+            if st.button("📂 Load dữ liệu DB", use_container_width=True):
                 df = st.session_state.db.get_data_frame(selected_province_code)
                 if df is not None:
                     st.session_state.data = df
@@ -570,3 +570,4 @@ def run_analysis(df_original, config):
 
 if __name__ == "__main__":
     main()
+
