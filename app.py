@@ -537,14 +537,14 @@ def load_from_db_streamlit(province_code):
     else:
         st.session_state.df_data = None
         log_message("Database chưa có dữ liệu.", "WARN")
-
+# --- LOGIC MỚI (Đã Sửa) ---
 def start_scraping_thread_streamlit(province_name, days_count):
     """Khởi động Thread scraping, hiển thị progress bar."""
     
-    if st.session_state.df_data is None:
-        st.warning("Vui lòng tải dữ liệu từ DB trước khi chạy Backtest.")
+    if days_count <= 0:
+        log_message("Vui lòng nhập số ngày quét hợp lệ (> 0).", "WARN")
         return
-
+        
     province_code = PROVINCES.get(province_name, "xsmb")
     st.session_state.progress_value = 0 # Đặt giá trị progress bar ban đầu
     
@@ -552,8 +552,8 @@ def start_scraping_thread_streamlit(province_name, days_count):
     threading.Thread(target=scrape_manager_worker, args=(days_count, province_code, province_name, log_callback_for_scraper), daemon=True).start()
     
     # Đánh dấu cần chạy lại UI để hiển thị progress bar và log mới
-    st.experimental_rerun() 
-
+    st.experimental_rerun()
+    
 # ---------------------------
 # LOGIC PHÂN TÍCH (Chuyển đổi từ LotteryApp methods)
 # ---------------------------
@@ -787,3 +787,4 @@ def main_app():
 
 if __name__ == '__main__':
     main_app()
+
