@@ -499,16 +499,14 @@ def init_session_state():
     """Khởi tạo tất cả các biến trạng thái cần thiết."""
     if 'df_data' not in st.session_state:
         st.session_state.df_data = None
-    if 'optimal_weights' not in st.session_state:
-        st.session_state.optimal_weights = None
-    if 'use_optimal_weights_flag' not in st.session_state:
-        st.session_state.use_optimal_weights_flag = False
-    if 'log_messages' not in st.session_state:
-        st.session_state.log_messages = []
-    if 'analysis_results' not in st.session_state:
-        st.session_state.analysis_results = {'stats_df': None, 'pairs': [], 'l3': [], 'l4': []}
-    if 'backtest_results' not in st.session_state:
-        st.session_state.backtest_results = None
+    # ... (Các dòng code khác giữ nguyên)
+    if 'progress_value' not in st.session_state:
+        st.session_state.progress_value = 0
+    if 'backtest_running' not in st.session_state:
+        st.session_state.backtest_running = False
+    # THÊM: Cờ báo hiệu quá trình scraping đã hoàn tất
+    if 'scraping_done' not in st.session_state: 
+        st.session_state.scraping_done = False
 
 def log_message(msg, level="INFO"):
     """Thêm tin nhắn vào log (sử dụng session state)."""
@@ -521,6 +519,13 @@ def log_callback_for_scraper(msg, level):
         st.session_state.progress_value = msg
     else:
         log_message(msg, level)
+        if level in ["ERROR", "DONE", "WARN"]:
+            # Nếu scraping hoàn tất (DONE), đặt cờ scraping_done để main UI xử lý
+            if level == "DONE":
+                st.session_state.scraping_done = True
+            
+            # Kích hoạt Rerun khi có lỗi hoặc hoàn tất
+            st.experimental_rerun()
 
 def load_from_db_streamlit(province_code):
     """Load dữ liệu từ DB vào Streamlit Session State."""
@@ -546,12 +551,16 @@ def start_scraping_thread_streamlit(province_name, days_count):
         return
         
     province_code = PROVINCES.get(province_name, "xsmb")
-    st.session_state.progress_value = 0 # Đặt giá trị progress bar ban đầu
+    st.session_state.progress_value = 0 
+    
+    # Đặt cờ trạng thái trước khi chạy thread
+    st.session_state.backtest_running = True # Dùng cờ này cho tiến trình chung
+    st.session_state.scraping_done = False
     
     # Khởi động thread và chuyển hàm log callback vào
     threading.Thread(target=scrape_manager_worker, args=(days_count, province_code, province_name, log_callback_for_scraper), daemon=True).start()
     
-    # Đánh dấu cần chạy lại UI để hiển thị progress bar và log mới
+    # Kích hoạt Rerun để UI bắt đầu hiển thị progress
     st.experimental_rerun()
     
 # ---------------------------
@@ -663,9 +672,19 @@ def main_app():
     if st.session_state.df_data is not None:
         st.sidebar.caption(f"Lịch sử: {len(st.session_state.df_data)} kỳ")
 
-    # Hiển thị Progress Bar khi scraping
-    if 'progress_value' in st.session_state and st.session_state.progress_value > 0 and st.session_state.progress_value < 100:
+    # Hiển thị Progress Bar khi scraping/backtest
+    is_running = st.session_state.backtest_running and not st.session_state.scraping_done
+    if st.session_state.progress_value > 0 and is_running:
         st.sidebar.progress(st.session_state.progress_value / 100)
+    
+    # LOGIC MỚI: Xử lý sau khi Scraping hoàn tất
+    if st.session_state.scraping_done:
+        log_message("Scraping hoàn tất. Đang tải lại dữ liệu từ DB...", "INFO")
+        # Gọi hàm tải dữ liệu sau khi scraping xong
+        load_from_db_streamlit(province_code)
+        st.session_state.scraping_done = False # Reset cờ
+        st.session_state.backtest_running = False # Reset cờ tiến trình
+        st.experimental_rerun() # Buộc Streamlit cập nhật dữ liệu và hiển thị UI
     
     # --- PHÂN TÍCH ---
     st.header("2. Phân tích Dự đoán Hôm nay")
@@ -787,4 +806,5 @@ def main_app():
 
 if __name__ == '__main__':
     main_app()
+
 
