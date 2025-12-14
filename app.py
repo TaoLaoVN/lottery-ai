@@ -777,27 +777,10 @@ def main_app():
         st.info("Backtest đang chạy trong nền...")
         st.progress(st.session_state.progress_backtest / 100)
     
-    if st.session_state.backtest_results:
+    if "backtest_results" in st.session_state and st.session_state.backtest_results:
         results = st.session_state.backtest_results
         
-        st.subheader("Báo cáo Hiệu suất")
-        
-        # Tổng kết
-        summary = (
-            f"**TỔNG LÃI/LỖ:** <span style='color:{'green' if results['algo_stats']['AI_GOP']['hits'] > 0 else 'red'}'>{results['algo_stats']['AI_GOP']['hits'] * 99 - results['algo_stats']['AI_GOP']['bets'] * (27 if province_code == 'xsmb' else 18)}k</span>"
-            f" | **Tỷ lệ trúng Top K:** {results['precision_at_topk']*100:.1f}%"
-        )
-        st.markdown(summary, unsafe_allow_html=True)
-
-        st.dataframe(pd.DataFrame(results['details_for_ui']).rename(columns={
-            'predict_for_date': 'Ngày', 'topk': 'AI Dự đoán', 'hit_nums': 'Số Trúng', 'next_draw': 'KQ Thực'
-        }).set_index('Ngày'))
-
-        st.subheader("Audit Thuật toán")
-        audit_df = pd.DataFrame(results['algo_stats']).T
-        audit_df['Rate'] = (audit_df['hits'] / audit_df['bets'] * 100).round(1)
-        audit_df.columns = ['Bets', 'Hits', 'Rate (%)']
-        st.dataframe(audit_df.sort_values('Rate (%)', ascending=False))
+        st.subheader("Báo cáo Hiệu suất Backtest")
 
     # --- LOGS ---
     st.header("4. Logs")
@@ -806,5 +789,6 @@ def main_app():
 
 if __name__ == '__main__':
     main_app()
+
 
 
